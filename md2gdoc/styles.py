@@ -553,11 +553,28 @@ STYLES = {
 }
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Deep-merge override into a copy of base. Override wins on leaf conflicts."""
+    import copy
+    result = copy.deepcopy(base)
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge(result[k], v)
+        else:
+            result[k] = copy.deepcopy(v)
+    return result
+
+
 def get_style(name: str | None = None, style_file: str | None = None) -> dict | None:
-    """Get a style by name or from a JSON file. Returns None for no styling."""
+    """Get a style by name or from a JSON file. Returns None for no styling.
+
+    Custom JSON files are deep-merged with the 'clean' preset so that
+    missing keys fall back to sensible defaults instead of crashing.
+    """
     if style_file:
         with open(style_file) as f:
-            return json.load(f)
+            custom = json.load(f)
+        return _deep_merge(STYLES["clean"], custom)
     if name is None or name == "none":
         return None
     if name not in STYLES:
