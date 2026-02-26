@@ -131,17 +131,21 @@ def check_auth() -> bool:
 def revoke_auth():
     """Revoke stored credentials and delete token file."""
     if TOKEN_PATH.exists():
-        # Try to revoke the token with Google
+        # Try to revoke the token with Google (POST body, not URL param)
         try:
             with open(TOKEN_PATH) as f:
                 td = json.load(f)
             token = td.get("token") or td.get("access_token")
             if token:
                 import urllib.request
-                urllib.request.urlopen(
-                    f"https://oauth2.googleapis.com/revoke?token={token}",
-                    timeout=10,
+                import urllib.parse
+                data = urllib.parse.urlencode({"token": token}).encode("utf-8")
+                req = urllib.request.Request(
+                    "https://oauth2.googleapis.com/revoke",
+                    data=data,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
                 )
+                urllib.request.urlopen(req, timeout=10)
         except Exception:
             pass  # Best effort
 

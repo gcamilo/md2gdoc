@@ -1,7 +1,10 @@
 """Google Docs API engine — inserts content and applies styling."""
 
 import json
+import os
+import random
 import re
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -9,6 +12,7 @@ from pathlib import Path
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from .parser import strip_md
 
@@ -48,7 +52,19 @@ def get_credentials(token_path: str | None = None) -> Credentials:
                 client_id=td.get("client_id"),
                 client_secret=td.get("client_secret"),
             )
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except Exception as refresh_err:
+                # If refresh fails, check whether the existing token is still valid
+                if creds.token and creds.valid:
+                    return creds
+                # No refresh_token means we can't recover — guide the user
+                if not creds.refresh_token:
+                    raise RuntimeError(
+                        "Credential refresh failed and no refresh_token is available.\n"
+                        "Run 'md2gdoc auth' to re-authenticate."
+                    ) from refresh_err
+                raise
             return creds
 
     searched = [str(p) for p in candidates]
@@ -80,9 +96,19 @@ def get_drive_service(creds: Credentials = None, token_path: str = None):
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
+def _is_retryable(exc: Exception) -> bool:
+    """Return True if the exception represents a retryable API error (429 / 5xx)."""
+    if isinstance(exc, HttpError):
+        status = exc.resp.status if hasattr(exc, "resp") else 0
+        return status == 429 or 500 <= status < 600
+    # Fallback: string matching for wrapped errors
+    msg = str(exc)
+    return "429" in msg or "RATE_LIMIT" in msg or "500" in msg or "503" in msg
+
+
 def batch_send(docs_svc, doc_id: str, reqs: list, label: str = "",
                batch_size: int = 80, quiet: bool = False):
-    """Send requests in batches with rate-limit retry."""
+    """Send requests in batches with rate-limit retry and exponential backoff + jitter."""
     if not reqs:
         return
     for i in range(0, len(reqs), batch_size):
@@ -94,10 +120,12 @@ def batch_send(docs_svc, doc_id: str, reqs: list, label: str = "",
                 ).execute()
                 break
             except Exception as e:
-                if "429" in str(e) or "RATE_LIMIT" in str(e):
-                    wait = 15 * (attempt + 1)
+                if _is_retryable(e) and attempt < 4:
+                    base_wait = 15 * (attempt + 1)
+                    jitter = random.uniform(0, base_wait * 0.3)
+                    wait = base_wait + jitter
                     if not quiet:
-                        print(f"  Rate limited, waiting {wait}s...")
+                        print(f"  Retryable error, waiting {wait:.1f}s (attempt {attempt + 1}/5)...")
                     time.sleep(wait)
                 else:
                     raise
@@ -150,7 +178,12 @@ def insert_content(docs_svc, doc_id: str, blocks: list, style: dict | None = Non
             lc = cursor
 
             for b in seg["blocks"]:
-                plain, fmts = strip_md(b["text"])
+                if b["type"] == "code_block":
+                    # Code blocks: use raw text, no markdown processing
+                    plain = b["text"]
+                    fmts = []
+                else:
+                    plain, fmts = strip_md(b["text"])
                 text = plain + "\n"
                 reqs.append({"insertText": {"location": {"index": lc}, "text": text}})
 
@@ -166,11 +199,33 @@ def insert_content(docs_svc, doc_id: str, blocks: list, style: dict | None = Non
                         "range": {"startIndex": lc, "endIndex": lc + len(text)},
                         "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE",
                     }})
+                    level = b.get("level", 0)
+                    if level > 0:
+                        indent_pt = 36 * level
+                        reqs.append({"updateParagraphStyle": {
+                            "range": {"startIndex": lc, "endIndex": lc + len(text)},
+                            "paragraphStyle": {
+                                "indentStart": {"magnitude": indent_pt, "unit": "PT"},
+                                "indentFirstLine": {"magnitude": indent_pt, "unit": "PT"},
+                            },
+                            "fields": "indentStart,indentFirstLine",
+                        }})
                 elif b["type"] == "numbered":
                     reqs.append({"createParagraphBullets": {
                         "range": {"startIndex": lc, "endIndex": lc + len(text)},
                         "bulletPreset": "NUMBERED_DECIMAL_ALPHA_ROMAN",
                     }})
+                    level = b.get("level", 0)
+                    if level > 0:
+                        indent_pt = 36 * level
+                        reqs.append({"updateParagraphStyle": {
+                            "range": {"startIndex": lc, "endIndex": lc + len(text)},
+                            "paragraphStyle": {
+                                "indentStart": {"magnitude": indent_pt, "unit": "PT"},
+                                "indentFirstLine": {"magnitude": indent_pt, "unit": "PT"},
+                            },
+                            "fields": "indentStart,indentFirstLine",
+                        }})
                 elif b["type"] == "blockquote" and style:
                     fmt_reqs.append({"updateParagraphStyle": {
                         "range": {"startIndex": lc, "endIndex": lc + len(text)},
@@ -185,6 +240,28 @@ def insert_content(docs_svc, doc_id: str, blocks: list, style: dict | None = Non
                             },
                         },
                         "fields": "indentStart,indentEnd,borderLeft",
+                    }})
+                elif b["type"] == "code_block":
+                    # Monospace font + light gray background for code blocks
+                    fmt_reqs.append({"updateTextStyle": {
+                        "range": {"startIndex": lc, "endIndex": lc + len(text)},
+                        "textStyle": {
+                            "weightedFontFamily": {"fontFamily": "Courier New", "weight": 400},
+                            "fontSize": {"magnitude": 10, "unit": "PT"},
+                            "backgroundColor": {"color": {"rgbColor": {
+                                "red": 0.95, "green": 0.95, "blue": 0.95}}},
+                        },
+                        "fields": "weightedFontFamily,fontSize,backgroundColor",
+                    }})
+                    fmt_reqs.append({"updateParagraphStyle": {
+                        "range": {"startIndex": lc, "endIndex": lc + len(text)},
+                        "paragraphStyle": {
+                            "indentStart": {"magnitude": 12, "unit": "PT"},
+                            "indentEnd": {"magnitude": 12, "unit": "PT"},
+                            "spaceAbove": {"magnitude": 6, "unit": "PT"},
+                            "spaceBelow": {"magnitude": 6, "unit": "PT"},
+                        },
+                        "fields": "indentStart,indentEnd,spaceAbove,spaceBelow",
                     }})
 
                 # Inline formatting
@@ -641,7 +718,8 @@ def apply_spacing(docs_svc, doc_id: str, style: dict, quiet: bool = False):
 # ── Phase 4: Embed Diagrams ───────────────────────────────────────────
 
 def embed_diagrams(docs_svc, doc_id: str, blocks: list,
-                   creds: Credentials = None, quiet: bool = False):
+                   creds: Credentials = None, quiet: bool = False,
+                   public_diagrams: bool = False):
     """Find diagram placeholders, export slides as PNG, insert inline images."""
     diagrams = [b for b in blocks if b["type"] == "diagram"]
     if not diagrams:
@@ -658,16 +736,21 @@ def embed_diagrams(docs_svc, doc_id: str, blocks: list,
     for d in diagrams:
         pid = d["presentation_id"]
         if pid not in pres_slides:
-            pres = slides_svc.presentations().get(presentationId=pid).execute()
-            slide_map = {}
-            for i, slide in enumerate(pres.get("slides", []), 1):
-                slide_map[i] = slide["objectId"]
-            pres_slides[pid] = slide_map
-            if not quiet:
-                print(f"  Loaded presentation {pid}: {len(slide_map)} slides")
+            try:
+                pres = slides_svc.presentations().get(presentationId=pid).execute()
+                slide_map = {}
+                for i, slide in enumerate(pres.get("slides", []), 1):
+                    slide_map[i] = slide["objectId"]
+                pres_slides[pid] = slide_map
+                if not quiet:
+                    print(f"  Loaded presentation {pid}: {len(slide_map)} slides")
+            except Exception as e:
+                print(f"  WARNING: Failed to load presentation {pid}: {e}")
+                continue
 
-    # Export each slide as PNG
-    exported = {}
+    # Export each slide as PNG using secure temp files
+    exported = {}  # key -> local_path
+    temp_files = []  # track for cleanup
     for d in diagrams:
         key = (d["presentation_id"], d["slide_num"])
         if key in exported:
@@ -679,85 +762,108 @@ def embed_diagrams(docs_svc, doc_id: str, blocks: list,
                 print(f"  WARNING: Slide {snum} not found in presentation {pid}")
             continue
 
-        thumbnail = slides_svc.presentations().pages().getThumbnail(
-            presentationId=pid,
-            pageObjectId=page_id,
-            thumbnailProperties_thumbnailSize="LARGE",
-        ).execute()
+        try:
+            thumbnail = slides_svc.presentations().pages().getThumbnail(
+                presentationId=pid,
+                pageObjectId=page_id,
+                thumbnailProperties_thumbnailSize="LARGE",
+            ).execute()
 
-        local_path = f"/tmp/md2gdoc_slide_{pid[:8]}_{snum}.png"
-        urllib.request.urlretrieve(thumbnail["contentUrl"], local_path)
-        exported[key] = local_path
-        if not quiet:
-            print(f"  Exported Slide {snum}: {local_path}")
-
-    # Find and replace placeholders (reverse order to preserve indices)
-    doc = get_doc(docs_svc, doc_id)
-    body_content = doc["body"]["content"]
-
-    placeholders = []
-    for el in body_content:
-        if "paragraph" not in el:
-            continue
-        for elem in el["paragraph"].get("elements", []):
-            text = elem.get("textRun", {}).get("content", "")
-            m = re.match(r"\{\{DIAGRAM:([^:]+):SLIDE(\d+):([^}]+)\}\}", text)
-            if m:
-                placeholders.append({
-                    "presentation_id": m.group(1),
-                    "slide_num": int(m.group(2)),
-                    "label": m.group(3),
-                    "start": elem["startIndex"],
-                    "end": elem["endIndex"],
-                })
-
-    if not placeholders:
-        if not quiet:
-            print("  No diagram placeholders found in doc")
-        return
-
-    placeholders.sort(key=lambda p: p["start"], reverse=True)
-
-    from googleapiclient.http import MediaFileUpload
-    for ph in placeholders:
-        key = (ph["presentation_id"], ph["slide_num"])
-        local_path = exported.get(key)
-        if not local_path:
+            fd, local_path = tempfile.mkstemp(suffix=".png", prefix="md2gdoc_")
+            os.close(fd)
+            temp_files.append(local_path)
+            urllib.request.urlretrieve(thumbnail["contentUrl"], local_path)
+            exported[key] = local_path
+            if not quiet:
+                print(f"  Exported Slide {snum}: {local_path}")
+        except Exception as e:
+            print(f"  WARNING: Failed to export slide {snum} from {pid}: {e}")
             continue
 
-        file_metadata = {"name": f"diagram_{ph['label'].replace(' ', '_')}.png"}
-        media = MediaFileUpload(local_path, mimetype="image/png")
-        uploaded = drive_svc.files().create(
-            body=file_metadata, media_body=media, fields="id",
-        ).execute()
-        file_id = uploaded["id"]
+    try:
+        # Find and replace placeholders (reverse order to preserve indices)
+        doc = get_doc(docs_svc, doc_id)
+        body_content = doc["body"]["content"]
 
-        drive_svc.permissions().create(
-            fileId=file_id,
-            body={"type": "anyone", "role": "reader"},
-        ).execute()
+        placeholders = []
+        for el in body_content:
+            if "paragraph" not in el:
+                continue
+            for elem in el["paragraph"].get("elements", []):
+                text = elem.get("textRun", {}).get("content", "")
+                m = re.match(r"\{\{DIAGRAM:([^:]+):SLIDE(\d+):([^}]+)\}\}", text)
+                if m:
+                    placeholders.append({
+                        "presentation_id": m.group(1),
+                        "slide_num": int(m.group(2)),
+                        "label": m.group(3),
+                        "start": elem["startIndex"],
+                        "end": elem["endIndex"],
+                    })
 
-        img_url = f"https://drive.google.com/uc?id={file_id}"
-        reqs = [
-            {"deleteContentRange": {"range": {
-                "startIndex": ph["start"], "endIndex": ph["end"]}}},
-            {"insertInlineImage": {
-                "location": {"index": ph["start"]},
-                "uri": img_url,
-                "objectSize": {"width": {"magnitude": PAGE_WIDTH_PT, "unit": "PT"}},
-            }},
-        ]
-        batch_send(docs_svc, doc_id, reqs, f"Embed: {ph['label']}", quiet=quiet)
+        if not placeholders:
+            if not quiet:
+                print("  No diagram placeholders found in doc")
+            return
 
-    if not quiet:
-        print(f"  Embedded {len(placeholders)} diagram(s)")
+        placeholders.sort(key=lambda p: p["start"], reverse=True)
+
+        from googleapiclient.http import MediaFileUpload
+        embedded_count = 0
+        for ph in placeholders:
+            key = (ph["presentation_id"], ph["slide_num"])
+            local_path = exported.get(key)
+            if not local_path:
+                continue
+
+            try:
+                file_metadata = {"name": f"diagram_{ph['label'].replace(' ', '_')}.png"}
+                media = MediaFileUpload(local_path, mimetype="image/png")
+                uploaded = drive_svc.files().create(
+                    body=file_metadata, media_body=media, fields="id",
+                ).execute()
+                file_id = uploaded["id"]
+
+                # Only make world-readable if explicitly requested
+                if public_diagrams:
+                    drive_svc.permissions().create(
+                        fileId=file_id,
+                        body={"type": "anyone", "role": "reader"},
+                    ).execute()
+
+                img_url = f"https://drive.google.com/uc?id={file_id}"
+                reqs = [
+                    {"deleteContentRange": {"range": {
+                        "startIndex": ph["start"], "endIndex": ph["end"]}}},
+                    {"insertInlineImage": {
+                        "location": {"index": ph["start"]},
+                        "uri": img_url,
+                        "objectSize": {"width": {"magnitude": PAGE_WIDTH_PT, "unit": "PT"}},
+                    }},
+                ]
+                batch_send(docs_svc, doc_id, reqs, f"Embed: {ph['label']}", quiet=quiet)
+                embedded_count += 1
+            except Exception as e:
+                print(f"  WARNING: Failed to embed diagram '{ph['label']}': {e}")
+                continue
+
+        if not quiet:
+            print(f"  Embedded {embedded_count} of {len(placeholders)} diagram(s)")
+    finally:
+        # Clean up temp files
+        for tf in temp_files:
+            try:
+                os.unlink(tf)
+            except OSError:
+                pass
 
 
 # ── Main conversion ───────────────────────────────────────────────────
 
 def convert(md_text: str, doc_id: str = None, title: str = None,
             style: dict | None = None, token_path: str = None,
-            embed: bool = True, quiet: bool = False) -> str:
+            embed: bool = True, quiet: bool = False,
+            public_diagrams: bool = False) -> str:
     """Convert markdown to a formatted Google Doc.
 
     Args:
@@ -768,6 +874,7 @@ def convert(md_text: str, doc_id: str = None, title: str = None,
         token_path: Path to Google OAuth token JSON
         embed: Whether to embed diagrams from Google Slides
         quiet: Suppress progress output
+        public_diagrams: Make uploaded diagram images world-readable (default False)
 
     Returns:
         Google Doc URL
@@ -817,7 +924,8 @@ def convert(md_text: str, doc_id: str = None, title: str = None,
     if has_diagrams and embed:
         if not quiet:
             print("\nPhase 2: Embedding diagrams...")
-        embed_diagrams(docs_svc, doc_id, blocks, creds=creds, quiet=quiet)
+        embed_diagrams(docs_svc, doc_id, blocks, creds=creds, quiet=quiet,
+                       public_diagrams=public_diagrams)
 
     # Phase 3: Styling
     if style:

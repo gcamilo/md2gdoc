@@ -60,6 +60,7 @@ def cmd_convert(args):
             token_path=args.credentials,
             embed=not args.no_diagrams,
             quiet=args.quiet,
+            public_diagrams=getattr(args, "public_diagrams", False),
         )
         if args.quiet:
             print(url)
@@ -120,6 +121,8 @@ getting started:
     parser.add_argument("--credentials", help="Path to Google OAuth token JSON")
     parser.add_argument("--no-diagrams", action="store_true",
                         help="Skip diagram embedding from Google Slides")
+    parser.add_argument("--public-diagrams", action="store_true",
+                        help="Make uploaded diagram images world-readable (default: private)")
     parser.add_argument("--stdin", action="store_true",
                         help="Read markdown from stdin instead of file")
     parser.add_argument("--quiet", "-q", action="store_true",
