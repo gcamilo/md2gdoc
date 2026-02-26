@@ -55,7 +55,8 @@ def get_credentials(token_path: str | None = None) -> Credentials:
     raise FileNotFoundError(
         f"No Google OAuth token found. Searched:\n"
         + "\n".join(f"  - {p}" for p in searched)
-        + "\n\nSet GOOGLE_TOKEN_PATH or create ~/.config/md2gdoc/token.json"
+        + "\n\nRun 'md2gdoc auth' to set up credentials."
+        + "\nOr run 'md2gdoc auth --setup-guide' for step-by-step instructions."
     )
 
 
