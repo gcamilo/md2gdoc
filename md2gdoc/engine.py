@@ -863,7 +863,8 @@ def embed_diagrams(docs_svc, doc_id: str, blocks: list,
 def convert(md_text: str, doc_id: str = None, title: str = None,
             style: dict | None = None, token_path: str = None,
             embed: bool = True, quiet: bool = False,
-            public_diagrams: bool = False) -> str:
+            public_diagrams: bool = False,
+            folder_id: str = None) -> str:
     """Convert markdown to a formatted Google Doc.
 
     Args:
@@ -875,6 +876,7 @@ def convert(md_text: str, doc_id: str = None, title: str = None,
         embed: Whether to embed diagrams from Google Slides
         quiet: Suppress progress output
         public_diagrams: Make uploaded diagram images world-readable (default False)
+        folder_id: Google Drive folder ID to place new doc in (default: root)
 
     Returns:
         Google Doc URL
@@ -913,6 +915,16 @@ def convert(md_text: str, doc_id: str = None, title: str = None,
         doc_id = doc["documentId"]
         if not quiet:
             print(f"  Created: {doc_id}")
+        # Move to target folder if specified
+        if folder_id:
+            drive_svc = get_drive_service(creds)
+            drive_svc.files().update(
+                fileId=doc_id,
+                addParents=folder_id,
+                removeParents="root",
+            ).execute()
+            if not quiet:
+                print(f"  Moved to folder: {folder_id}")
 
     # Phase 1: Insert content
     if not quiet:

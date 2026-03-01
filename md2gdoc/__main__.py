@@ -61,6 +61,7 @@ def cmd_convert(args):
             embed=not args.no_diagrams,
             quiet=args.quiet,
             public_diagrams=getattr(args, "public_diagrams", False),
+            folder_id=getattr(args, "folder_id", None),
         )
         if args.quiet:
             print(url)
@@ -123,6 +124,8 @@ getting started:
                         help="Skip diagram embedding from Google Slides")
     parser.add_argument("--public-diagrams", action="store_true",
                         help="Make uploaded diagram images world-readable (default: private)")
+    parser.add_argument("--folder-id",
+                        help="Google Drive folder ID to place new doc in (default: root)")
     parser.add_argument("--stdin", action="store_true",
                         help="Read markdown from stdin instead of file")
     parser.add_argument("--quiet", "-q", action="store_true",
