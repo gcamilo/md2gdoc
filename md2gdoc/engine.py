@@ -400,9 +400,10 @@ def apply_styling(docs_svc, doc_id: str, style: dict, quiet: bool = False):
             "paragraphStyle": {
                 "spaceAbove": {"magnitude": head_cfg["space_above"].get(level, 14), "unit": "PT"},
                 "spaceBelow": {"magnitude": head_cfg["space_below"].get(level, 6), "unit": "PT"},
+                "lineSpacing": head_cfg.get("line_spacing", {}).get(level, 100) if isinstance(head_cfg.get("line_spacing"), dict) else head_cfg.get("line_spacing", 100),
                 "keepWithNext": True,
             },
-            "fields": "spaceAbove,spaceBelow,keepWithNext",
+            "fields": "spaceAbove,spaceBelow,lineSpacing,keepWithNext",
         }})
 
         # H2 border
