@@ -550,6 +550,53 @@ STYLES = {
         },
         "margins": {"top": 54, "bottom": 54, "left": 54, "right": 54},
     },
+
+    "counsel": {
+        "name": "Counsel",
+        "body": {
+            "font": "EB Garamond",
+            "size": 11,
+            "color": _NEAR_BLACK,
+            "line_spacing": 125,
+            "space_above": 2,
+            "space_below": 6,
+        },
+        "headings": {
+            "font": "Montserrat",
+            "color": _SLATE,
+            "sizes": {1: 20, 2: 15, 3: 12, 4: 11},
+            "bold": {1: True, 2: True, 3: True, 4: False},
+            "line_spacing": {1: 100, 2: 100, 3: 100, 4: 100},
+            "space_above": {1: 16, 2: 12, 3: 8, 4: 6},
+            "space_below": {1: 6, 2: 4, 3: 3, 4: 3},
+        },
+        "h2_border": _SLATE,
+        "tables": {
+            "font": "Montserrat",
+            "size": 9,
+            "header_bg": _SLATE,
+            "header_color": _WHITE,
+            "header_bold": True,
+            "alt_row_bg": _LIGHT_SLATE,
+            "row_bg": _WHITE_BG,
+            "body_color": _NEAR_BLACK,
+            "cell_padding": {"top": 3, "bottom": 3, "left": 5, "right": 5},
+            "header_padding": {"top": 4, "bottom": 4, "left": 5, "right": 5},
+        },
+        "blockquote": {
+            "border_color": _SLATE,
+            "border_width": 2,
+            "indent": 18,
+        },
+        "bullets": {
+            "space_above": 1,
+            "space_below": 2,
+            "line_spacing": 120,
+            "list_start_space": 4,
+            "list_end_space": 6,
+        },
+        "margins": {"top": 72, "bottom": 72, "left": 72, "right": 72},
+    },
 }
 
 
